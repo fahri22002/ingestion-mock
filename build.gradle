@@ -1,0 +1,50 @@
+plugins {
+    id 'java'
+    id 'io.quarkus' version '3.8.3'
+}
+
+repositories {
+    mavenCentral()
+    mavenLocal()
+}
+
+dependencies {
+    // 1. Quarkus BOM
+    implementation enforcedPlatform('io.quarkus.platform:quarkus-bom:3.8.3')
+
+    // 2. Ekstensi Utama
+    implementation 'io.quarkus:quarkus-vertx'
+    implementation 'io.quarkus:quarkus-arc'
+
+    // Konfigurasi standar Lombok untuk Gradle
+    compileOnly 'org.projectlombok:lombok:1.18.30'
+    annotationProcessor 'org.projectlombok:lombok:1.18.30'
+
+    // 3. Ekstensi Redis (Baru)
+    implementation 'io.quarkus:quarkus-redis-client'
+
+    // 4. Dependensi Testing
+    testImplementation 'io.quarkus:quarkus-junit5'
+    testImplementation 'io.rest-assured:rest-assured'
+
+    // Lombok untuk environment test (opsional tapi disarankan)
+    testCompileOnly 'org.projectlombok:lombok:1.18.30'
+    testAnnotationProcessor 'org.projectlombok:lombok:1.18.30'
+}
+
+group 'com.ingestion.gateway'
+version '1.0.0-SNAPSHOT'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+compileJava {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-parameters'
+}
+
+compileTestJava {
+    options.encoding = 'UTF-8'
+}
