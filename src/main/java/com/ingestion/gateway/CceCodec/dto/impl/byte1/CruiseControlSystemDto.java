@@ -7,4 +7,8 @@ import lombok.Data;
 public class CruiseControlSystemDto implements CceDto{
     private int parameterId;
 	private short cruiseControlSystem;
+
+    public boolean isSwitchOn(){
+        return cruiseControlSystem==0x01;
+    }
 }

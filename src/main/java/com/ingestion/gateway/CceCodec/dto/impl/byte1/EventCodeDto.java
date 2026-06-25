@@ -5,6 +5,6 @@ import lombok.Data;
 
 @Data
 public class EventCodeDto implements CceDto{
-    private int parameterId = 0x01;
+    private int parameterId;
     private short eventCode;
 }

@@ -14,7 +14,7 @@ public class GeoFenceNumberCodec extends AbstractByte1Codec<GeoFenceNumberDto> {
 
     @Override
     public int getSupportedParameterId() {
-        return 0x01;
+        return 0x1b;
     }
 
     @Override

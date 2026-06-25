@@ -7,4 +7,8 @@ import lombok.Data;
 public class ParkingBrakeSwitchDto implements CceDto{
     private int parameterId;
 	private short parkingBrakeSwitch;
+
+    public boolean isApplyBrake(){
+        return parkingBrakeSwitch==0x01;
+    }
 }

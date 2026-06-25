@@ -7,4 +7,8 @@ import lombok.Data;
 public class ClutchSwitchDto implements CceDto{
     private int parameterId;
     private short clutchSwitch;
+
+    public boolean isPressed(){
+        return  clutchSwitch == 1;
+    }
 }

@@ -7,4 +7,8 @@ import lombok.Data;
 public class TachographPerformanceDto implements CceDto{
     private int parameterId;
 	private short tachographPerformance;
+
+    public boolean isPerformanceAnalysis(){
+        return tachographPerformance == 0x01;
+    }
 }

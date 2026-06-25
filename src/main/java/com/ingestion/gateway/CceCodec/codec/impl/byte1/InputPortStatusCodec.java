@@ -14,7 +14,7 @@ public class InputPortStatusCodec extends AbstractByte1Codec<InputPortStatusDto>
 
     @Override
     public int getSupportedParameterId() {
-        return 0x1b;
+        return 0x15;
     }
 
     @Override

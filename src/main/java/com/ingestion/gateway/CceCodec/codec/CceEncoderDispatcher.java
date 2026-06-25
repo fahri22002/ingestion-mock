@@ -24,7 +24,7 @@ public class CceEncoderDispatcher {
     private static final Logger LOG = Logger.getLogger(CceEncoderDispatcher.class);
 
     @Inject
-    Instance<CceMessageCodec<? extends CceDto>> availableEncoders;
+    Instance<CceMessageCodec<?>> availableEncoders;
 
     private final Map<Integer, CceMessageCodec<CceDto>> encoderRegistry = new HashMap<>();
 
@@ -32,7 +32,10 @@ public class CceEncoderDispatcher {
     void onStart(@Observes StartupEvent ev) {
         for (CceMessageCodec<?> encoder : availableEncoders) {
             encoderRegistry.put(encoder.getSupportedParameterId(), (CceMessageCodec<CceDto>) encoder);
+            LOG.infof("Registered CCE Encoder: Parameter ID 0x%02X -> %s",
+                    encoder.getSupportedParameterId(), encoder.getClass().getSimpleName());
         }
+        LOG.infof("Total CCE Encoders registered: %d", encoderRegistry.size());
     }
 
     public byte[] encode(CceMessageEnvelope envelope) throws Exception {
@@ -47,6 +50,7 @@ public class CceEncoderDispatcher {
             CceMessageCodec<CceDto> encoder = encoderRegistry.get(paramId);
 
             if (encoder == null || !encoder.getSupportedDtoClass().isInstance(dto)) {
+                LOG.errorf("SKIP : Parameter ID tidak terdaftar %s", dto);
                 continue;
             }
 

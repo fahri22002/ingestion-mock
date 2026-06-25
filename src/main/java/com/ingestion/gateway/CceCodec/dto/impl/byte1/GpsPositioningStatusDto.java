@@ -5,7 +5,7 @@ import lombok.Data;
 
 @Data
 public class GpsPositioningStatusDto implements CceDto {
-    private int parameterId = 0x05; // ID didefinisikan di sini
+    private int parameterId;
     private short gpsPositioningStatus;
 
     public boolean isValid() {
