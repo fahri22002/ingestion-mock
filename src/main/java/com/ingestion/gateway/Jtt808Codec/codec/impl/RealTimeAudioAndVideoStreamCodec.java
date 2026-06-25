@@ -11,27 +11,81 @@ public class RealTimeAudioAndVideoStreamCodec {
     private static final Logger LOG = Logger.getLogger(RealTimeAudioAndVideoStreamCodec.class);
     public static final long FRAME_HEADER_MAGIC = 0x30316364L;
 
+//    public RealTimeAudioAndVideoStreamDto decodeStream(byte[] rawStreamData) {
+//        ByteBuffer buf = ByteBuffer.wrap(rawStreamData);
+//        RealTimeAudioAndVideoStreamDto dto = new RealTimeAudioAndVideoStreamDto();
+//        try {
+//            dto.setFrameHeaderIdentifier(Integer.toUnsignedLong(buf.getInt()));
+//            byte b4 = buf.get();
+//            dto.setV((b4 >> 6) & 0x03);
+//            dto.setP((b4 >> 5) & 0x01);
+//            dto.setX((b4 >> 4) & 0x01);
+//            dto.setCc(b4 & 0x0F);
+//            byte b5 = buf.get();
+//            dto.setM((b5 >> 7) & 0x01);
+//            dto.setPt(b5 & 0x7F);
+//            dto.setPacketSequenceNumber(Short.toUnsignedInt(buf.getShort()));
+//            byte[] simBytes = new byte[6];
+//            buf.get(simBytes);
+//            dto.setSimCardNumber(decodeBcd(simBytes));
+//            dto.setLogicalChannelNumber(Byte.toUnsignedInt(buf.get()));
+//            byte b15 = buf.get();
+//            dto.setDataType((b15 >> 4) & 0x0F);
+//            dto.setFragmentationFlag(b15 & 0x0F);
+//            if (dto.getDataType() != 4) {
+//                dto.setTimestamp(buf.getLong());
+//                if (dto.getDataType() == 0 || dto.getDataType() == 1 || dto.getDataType() == 2) {
+//                    dto.setLastIFrameInterval(Short.toUnsignedInt(buf.getShort()));
+//                    dto.setLastFrameInterval(Short.toUnsignedInt(buf.getShort()));
+//                }
+//            }
+//            dto.setDataBodyLength(Short.toUnsignedInt(buf.getShort()));
+//            byte[] body = new byte[dto.getDataBodyLength()];
+//            buf.get(body);
+//            dto.setDataBody(body);
+//        } catch (Exception e) {
+//            LOG.error("Gagal decode Real-time A/V Stream", e);
+//            return null;
+//        }
+//        return dto;
+//    }
+
     public RealTimeAudioAndVideoStreamDto decodeStream(byte[] rawStreamData) {
         ByteBuffer buf = ByteBuffer.wrap(rawStreamData);
         RealTimeAudioAndVideoStreamDto dto = new RealTimeAudioAndVideoStreamDto();
         try {
-            dto.setFrameHeaderIdentifier(Integer.toUnsignedLong(buf.getInt()));
+            // 1. Validasi Magic Number (Sync Word)
+            long magic = Integer.toUnsignedLong(buf.getInt());
+            if (magic != FRAME_HEADER_MAGIC) {
+                LOG.warnf("Header tidak valid: %X", magic);
+                return null;
+            }
+            dto.setFrameHeaderIdentifier(magic);
+
+            // 2. Baca Header
             byte b4 = buf.get();
             dto.setV((b4 >> 6) & 0x03);
             dto.setP((b4 >> 5) & 0x01);
             dto.setX((b4 >> 4) & 0x01);
             dto.setCc(b4 & 0x0F);
+
             byte b5 = buf.get();
             dto.setM((b5 >> 7) & 0x01);
             dto.setPt(b5 & 0x7F);
+
             dto.setPacketSequenceNumber(Short.toUnsignedInt(buf.getShort()));
+
             byte[] simBytes = new byte[6];
             buf.get(simBytes);
             dto.setSimCardNumber(decodeBcd(simBytes));
+
             dto.setLogicalChannelNumber(Byte.toUnsignedInt(buf.get()));
+
             byte b15 = buf.get();
             dto.setDataType((b15 >> 4) & 0x0F);
             dto.setFragmentationFlag(b15 & 0x0F);
+
+            // 3. Baca Field Opsional
             if (dto.getDataType() != 4) {
                 dto.setTimestamp(buf.getLong());
                 if (dto.getDataType() == 0 || dto.getDataType() == 1 || dto.getDataType() == 2) {
@@ -39,10 +93,21 @@ public class RealTimeAudioAndVideoStreamCodec {
                     dto.setLastFrameInterval(Short.toUnsignedInt(buf.getShort()));
                 }
             }
-            dto.setDataBodyLength(Short.toUnsignedInt(buf.getShort()));
-            byte[] body = new byte[dto.getDataBodyLength()];
+
+            // 4. Baca Body
+            int bodyLength = Short.toUnsignedInt(buf.getShort());
+            dto.setDataBodyLength(bodyLength);
+
+            // PENTING: Cek apakah data yang tersisa di buffer cukup
+            if (buf.remaining() < bodyLength) {
+                LOG.errorf("Body tidak lengkap. Perlu %d, sisa %d", bodyLength, buf.remaining());
+                return null;
+            }
+
+            byte[] body = new byte[bodyLength];
             buf.get(body);
             dto.setDataBody(body);
+
         } catch (Exception e) {
             LOG.error("Gagal decode Real-time A/V Stream", e);
             return null;

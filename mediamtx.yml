@@ -1,0 +1,9 @@
+paths:
+  camera1:
+    # Mengizinkan koneksi dari publisher (FFmpeg)
+    source: publisher
+
+# Konfigurasi agar output bisa dibuka di browser
+hls: yes
+hlsAlways: yes
+hlsAddress: :8888

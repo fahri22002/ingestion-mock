@@ -15,6 +15,7 @@ dependencies {
     // 2. Ekstensi Utama
     implementation 'io.quarkus:quarkus-vertx'
     implementation 'io.quarkus:quarkus-arc'
+    implementation 'io.quarkus:quarkus-resteasy-reactive'
 
     // Konfigurasi standar Lombok untuk Gradle
     compileOnly 'org.projectlombok:lombok:1.18.30'
