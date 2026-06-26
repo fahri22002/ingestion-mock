@@ -19,6 +19,12 @@ public class SetTrackerParameterDto implements Jtt808Dto {
     // Parameter Item List
     private List<ParameterItem> items = new ArrayList<>();
 
+    public void addParameter(long parameterId, long dwordValue) {
+        byte[] valueBytes = ByteBuffer.allocate(4).putInt((int) dwordValue).array();
+        this.items.add(new ParameterItem(parameterId, 4, valueBytes));
+        this.totalParameters = this.items.size();
+    }
+
     @Data
     @NoArgsConstructor
     @AllArgsConstructor

@@ -52,4 +52,8 @@ public class RealTimeAudioAndVideoStreamDto implements Jtt808Dto {
 
     // BYTE[n]: Data Body
     private byte[] dataBody;
+
+    // Tambahkan di dalam RealTimeAudioAndVideoStreamDto
+    private int totalFrameLength;
+
 }

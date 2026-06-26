@@ -100,7 +100,7 @@ public class RealTimeAudioAndVideoStreamCodec {
 
             // PENTING: Cek apakah data yang tersisa di buffer cukup
             if (buf.remaining() < bodyLength) {
-                LOG.errorf("Body tidak lengkap. Perlu %d, sisa %d", bodyLength, buf.remaining());
+//                LOG.errorf("Body tidak lengkap. Perlu %d, sisa %d", bodyLength, buf.remaining());
                 return null;
             }
 

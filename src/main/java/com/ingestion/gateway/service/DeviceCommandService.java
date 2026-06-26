@@ -67,4 +67,59 @@ public class DeviceCommandService {
 
         return false;
     }
+
+    /**
+     * Memerintahkan MDVR untuk mengatur parameter (0x8103).
+     * @return true jika perintah berhasil dikirim, false jika device offline/error.
+     */
+    public boolean sendSetParametersCommand(String imei, com.ingestion.gateway.dto.SetParametersRequestDto request) {
+        // 1. Cek Sesi TCP aktif
+        Consumer<byte[]> replier = connectionManager.getSession(imei);
+        if (replier == null) {
+            LOG.warnf("Tidak dapat mengirim 0x8103. IMEI %s sedang offline.", imei);
+            return false;
+        }
+
+        // 2. Siapkan DTO 0x8103 (Gunakan DTO bawaan Jtt808Codec Anda)
+        // Asumsi: Library codec Anda memiliki DTO bernama SetTrackerParameterDto
+        com.ingestion.gateway.Jtt808Codec.dto.impl.core.SetTrackerParameterDto paramDto =
+                new com.ingestion.gateway.Jtt808Codec.dto.impl.core.SetTrackerParameterDto();
+
+        // 3. Masukkan parameter ke DTO sesuai Tabel 8 JTT808 Meitrack
+        if (request.getReportingInterval() != null) {
+            paramDto.addParameter(0x0029, request.getReportingInterval());
+        }
+        if (request.getTurningAngle() != null) {
+            paramDto.addParameter(0x0030, request.getTurningAngle());
+        }
+        if (request.getMaxSpeed() != null) {
+            paramDto.addParameter(0x0055, request.getMaxSpeed());
+        }
+        if (request.getOverspeedDuration() != null) {
+            paramDto.addParameter(0x0056, request.getOverspeedDuration());
+        }
+
+        // 4. Bungkus ke dalam Envelope
+        Jtt808MessageEnvelope envelope = new Jtt808MessageEnvelope();
+        envelope.setMessageId(0x8103);
+        envelope.setImei(imei);
+        envelope.setProtocolVersion(1);
+        envelope.setSegmented(false);
+        envelope.setEncryptionMethod(0);
+        envelope.setData(paramDto);
+
+        try {
+            // 5. Encode & Kirim
+            List<byte[]> encodedPackets = encoderDispatcher.encode(envelope);
+            if (!encodedPackets.isEmpty()) {
+                replier.accept(encodedPackets.get(0));
+                LOG.infof("✅ Perintah Set Parameter (0x8103) terkirim ke IMEI: %s", imei);
+                return true;
+            }
+        } catch (Exception e) {
+            LOG.error("Gagal men-encode atau mengirim perintah 0x8103 ke " + imei, e);
+        }
+
+        return false;
+    }
 }

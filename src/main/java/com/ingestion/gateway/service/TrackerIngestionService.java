@@ -5,6 +5,7 @@ import com.ingestion.gateway.Jtt808Codec.dto.Jtt808MessageEnvelope;
 import com.ingestion.gateway.dto.RawTrackerMessageDto;
 import com.ingestion.gateway.Jtt808Codec.codec.impl.RealTimeAudioAndVideoStreamCodec;
 import com.ingestion.gateway.Jtt808Codec.dto.impl.core.RealTimeAudioAndVideoStreamDto;
+import  com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
@@ -19,10 +20,18 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 
 import java.util.function.Consumer;
+import java.util.ArrayList;
+import java.util.Arrays;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
+
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 
 @ApplicationScoped
 public class TrackerIngestionService {
@@ -40,6 +49,10 @@ public class TrackerIngestionService {
 
     // In-memory buffer untuk reassembly JTT1078
     private final ConcurrentHashMap<String, ByteArrayOutputStream> streamBufferMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ByteArrayOutputStream> tcpStreamBuffers = new ConcurrentHashMap<>();
+
+    private final LinkedBlockingQueue<byte[]> videoFrameQueue = new LinkedBlockingQueue<>(1000);
+    private final ExecutorService ffmpegExecutor = Executors.newSingleThreadExecutor();
 
     // Direktori tempat menyimpan file video mentah
     private static final String STREAM_OUTPUT_DIR = "mdvr_streams";
@@ -97,19 +110,86 @@ public class TrackerIngestionService {
                 break;
 
             default:
-                LOG.debug("Message ID tidak di-handle: " + messageId);
+                if (finalDecodedEnvelope.getData() == null) {
+                    LOG.debug("Message ID tidak di-handle: " + messageId);
+
+                }
+
+                try {
+                    ObjectMapper mapper = new ObjectMapper();
+                    String jsonString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(finalDecodedEnvelope.getData());
+
+                    LOG.infof("Isi data : \n%s", jsonString);
+                } catch (Exception e) {
+                    LOG.error("Gagal convert data ke JSON", e);
+                }
                 break;
         }
     }
 
     private void handleJtt1078Stream(String remoteAddress, byte[] rawBytes) {
-        // KITA TIDAK LAGI MENGGUNAKAN CODEC JTT1078 KARENA DATA ADALAH RAW H.264
-        // Cukup simpan langsung ke file .h264
+        // 1. Ambil atau buat buffer untuk koneksi ini
+        ByteArrayOutputStream buffer = tcpStreamBuffers.computeIfAbsent(remoteAddress, k -> new ByteArrayOutputStream());
 
-        // Gunakan remoteAddress sebagai kunci untuk membedakan stream device
-        sendToMediaMtx(rawBytes);
+        try {
+            // 2. Tambahkan data baru ke ujung buffer
+            buffer.write(rawBytes);
+            byte[] currentStream = buffer.toByteArray();
 
-        LOG.debugf("Berhasil menyimpan %d bytes mentah ke file.", rawBytes.length);
+            int offset = 0;
+
+            // 3. Looping untuk mencari dan memproses semua frame utuh dalam buffer
+            while (offset < currentStream.length - 4) {
+                // Cari Magic Word (0x30, 0x31, 0x63, 0x64)
+                if (currentStream[offset] == 0x30 && currentStream[offset+1] == 0x31 &&
+                        currentStream[offset+2] == 0x63 && currentStream[offset+3] == 0x64) {
+
+                    // Kita menemukan start header. Sekarang kita harus menebak total panjang frame.
+                    // Minimal kita butuh 30 bytes untuk membaca parameter di header.
+                    if (currentStream.length - offset < 30) {
+                        break; // Data belum cukup untuk baca header, tunggu paket TCP berikutnya
+                    }
+
+                    // Decode sementara menggunakan potongan dari offset untuk mengetahui panjang body
+                    byte[] potentialFrame = Arrays.copyOfRange(currentStream, offset, currentStream.length);
+                    RealTimeAudioAndVideoStreamDto streamDto = streamCodec.decodeStream(potentialFrame);
+
+                    if (streamDto != null && streamDto.getDataBody() != null) {
+                        int frameLength = streamDto.getTotalFrameLength();
+
+                        // Gunakan INFOF agar terlihat di console
+                        LOG.infof("✅ Frame JTT1078 Utuh! Tipe: %d, Fragmen: %d, Size: %d",
+                                streamDto.getDataType(), streamDto.getFragmentationFlag(), frameLength);
+
+                        processStreamReassembly(remoteAddress, streamDto);
+                        offset += frameLength;
+                    } else {
+                        // PROTEKSI BARU: Hapus buffer jika ukurannya tidak wajar (corrupt)
+                        if (currentStream.length - offset > 70000) {
+                            LOG.warn("⚠️ Data melebihi batas JTT1078 namun decode gagal. Asumsi corrupt, skip header ini.");
+                            offset++;
+                            continue;
+                        }
+                        break;
+                    }
+                } else {
+                    // Bukan magic word, geser 1 byte ke depan untuk mencari magic word
+                    offset++;
+                }
+            }
+
+            // 4. Bersihkan buffer dari frame yang sudah diproses, simpan sisanya untuk nanti
+            if (offset > 0) {
+                buffer.reset();
+                if (offset < currentStream.length) {
+                    buffer.write(currentStream, offset, currentStream.length - offset);
+                }
+            }
+
+        } catch (Exception e) {
+            LOG.error("Gagal memproses stream buffer dari " + remoteAddress, e);
+            tcpStreamBuffers.remove(remoteAddress); // Reset jika terjadi fatal error
+        }
     }
 
     private void processStreamReassembly(String remoteAddress, RealTimeAudioAndVideoStreamDto dto) {
@@ -139,18 +219,15 @@ public class TrackerIngestionService {
                         byte[] completeData = finalBuffer.toByteArray();
 
                         LOG.infof("✅ Stream Selesai Dirakit [%s] | Total: %d bytes", streamKey, completeData.length);
-
-                        // Eksekusi penyimpanan ke file
-//                        saveStreamToFile(streamKey, completeData);
-                        sendToMediaMtx(completeData);
+                        // UBAH BARIS INI
+                        directSendToFfmpeg(completeData);
                     }
                     break;
 
                 case 0: // Single Packet (No Fragmentation)
-                    LOG.infof("✅ Single Stream Packet [%s] | Total: %d bytes", streamKey, payload.length);
-
-                    // Eksekusi penyimpanan ke file
-                    saveStreamToFile(streamKey, payload);
+                    LOG.debugf("✅ Single Stream Packet [%s] | Total: %d bytes", streamKey, payload.length);
+                    // UBAH BARIS INI
+                    directSendToFfmpeg(payload);
                     break;
             }
         } catch (IOException e) {
@@ -182,24 +259,24 @@ public class TrackerIngestionService {
         }
     }
 
-    private synchronized void ensureFfmpegRunning() throws IOException {
-        if (ffmpegProcess == null || !ffmpegProcess.isAlive()) {
-            // PERBAIKI DI SINI: Gunakan path lengkap yang sudah Anda temukan
-            String ffmpegPath = "C:\\Users\\User\\Downloads\\ffmpeg-master-latest-win64-gpl-shared\\ffmpeg-master-latest-win64-gpl-shared\\bin\\ffmpeg.exe";
-            String rtmpUrl = "rtmp://127.0.0.1/camera1";
-
-            ProcessBuilder pb = new ProcessBuilder(
-                    ffmpegPath, "-f", "h264", "-i", "pipe:0",
-                    "-c", "copy", "-f", "flv", rtmpUrl
-            );
-
-            // Penting: Redirect error stream agar kita bisa melihat log FFmpeg di console Java
-            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-
-            ffmpegProcess = pb.start();
-            ffmpegStdin = ffmpegProcess.getOutputStream();
-        }
-    }
+//    private synchronized void ensureFfmpegRunning() throws IOException {
+//        if (ffmpegProcess == null || !ffmpegProcess.isAlive()) {
+//            // PERBAIKI DI SINI: Gunakan path lengkap yang sudah Anda temukan
+//            String ffmpegPath = "C:\\Users\\User\\Downloads\\ffmpeg-master-latest-win64-gpl-shared\\ffmpeg-master-latest-win64-gpl-shared\\bin\\ffmpeg.exe";
+//            String rtmpUrl = "rtmp://127.0.0.1/camera1";
+//
+//            ProcessBuilder pb = new ProcessBuilder(
+//                    ffmpegPath, "-f", "h264", "-i", "pipe:0",
+//                    "-c", "copy", "-f", "flv", rtmpUrl
+//            );
+//
+//            // Penting: Redirect error stream agar kita bisa melihat log FFmpeg di console Java
+//            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+//
+//            ffmpegProcess = pb.start();
+//            ffmpegStdin = ffmpegProcess.getOutputStream();
+//        }
+//    }
 
     private ByteArrayOutputStream frameBuffer = new ByteArrayOutputStream();
 
@@ -219,38 +296,54 @@ public class TrackerIngestionService {
             LOG.error("Gagal menulis ke buffer", e);
         }
     }
-//
-//    private void flushBufferToFfmpeg() {
-//        byte[] completeFrame = frameBuffer.toByteArray();
-//        if (completeFrame.length > 0) {
-//            try {
-//                ensureFfmpegRunning();
-//                ffmpegStdin.write(completeFrame);
-//                ffmpegStdin.flush();
-//                LOG.debugf("Frame dikirim ke FFmpeg, size: %d", completeFrame.length);
-//            } catch (IOException e) {
-//                LOG.error("Gagal menulis ke FFmpeg", e);
-//            } finally {
-//                frameBuffer.reset(); // Bersihkan buffer setelah dikirim
-//            }
-//        }
-//    }
+    private synchronized void ensureFfmpegRunning() throws IOException {
+        if (ffmpegProcess == null || !ffmpegProcess.isAlive()) {
+            String ffmpegPath = "C:\\Users\\User\\Downloads\\ffmpeg-master-latest-win64-gpl-shared\\ffmpeg-master-latest-win64-gpl-shared\\bin\\ffmpeg.exe";
+            String rtmpUrl = "rtmp://127.0.0.1/camera1";
+
+            // UBAH KEMBALI PARAMETER FFMPEG KE STANDAR
+            ProcessBuilder pb = new ProcessBuilder(
+                    ffmpegPath,
+                    "-f", "h264",
+                    "-r", "25",
+                    "-i", "pipe:0",
+                    "-c:v", "copy",
+                    "-f", "flv",
+                    rtmpUrl
+            );
+
+            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+            pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+
+            ffmpegProcess = pb.start();
+            ffmpegStdin = ffmpegProcess.getOutputStream();
+            LOG.info("FFmpeg process berhasil distart.");
+        }
+    }
 
     private void sendToMediaMtx(byte[] rawBytes) {
-        // 1. Deteksi awal frame
         int offset = findStartCode(rawBytes);
 
         if (offset != -1) {
-            // Ditemukan Start Code (00 00 00 01)
-            // Kirim frame sebelumnya yang sudah terkumpul di buffer
+            // Cek 1 byte setelah Start Code (00 00 00 01) untuk mengetahui Tipe NALU
+            if (offset + 4 < rawBytes.length) {
+                byte naluByte = rawBytes[offset + 4];
+                int naluType = naluByte & 0x1F; // Ambil 5 bit terakhir
+
+                String typeName = "UNKNOWN";
+                if (naluType == 7) typeName = "SPS (Sequence Parameter Set) - PENTING!";
+                else if (naluType == 8) typeName = "PPS (Picture Parameter Set) - PENTING!";
+                else if (naluType == 5) typeName = "I-Frame (IDR)";
+                else if (naluType == 1) typeName = "P/B-Frame (Non-IDR)";
+
+                LOG.infof("NALU DETECTED: Type %d [%s]", naluType, typeName);
+            }
+
             if (frameBuffer.size() > 0) {
                 flushBufferToFfmpeg();
             }
-            // Mulai buffer baru dari offset ini
             addToBuffer(rawBytes, offset);
         } else {
-            // Tidak ditemukan Start Code, berarti ini adalah fragmen lanjutan
-            // Tambahkan seluruh paket ke buffer
             addToBuffer(rawBytes, 0);
         }
     }
@@ -261,24 +354,74 @@ public class TrackerIngestionService {
             try {
                 ensureFfmpegRunning();
 
-                // LOGGING: Print 4 byte pertama untuk validasi Start Code
-                // Harusnya hasilnya selalu: 00 00 00 01
-                StringBuilder header = new StringBuilder();
-                int limit = Math.min(completeFrame.length, 4);
-                for (int i = 0; i < limit; i++) {
-                    header.append(String.format("%02X ", completeFrame[i]));
+                // MEMENUHI PERMINTAAN: Print SEMUA byte (Code per Code) dalam format Hex
+                StringBuilder hexDump = new StringBuilder();
+                for (byte b : completeFrame) {
+                    hexDump.append(String.format("%02X ", b));
                 }
-                LOG.infof("SENDING TO FFMPEG | Size: %d | Start Code: %s", completeFrame.length, header.toString());
 
+                LOG.infof("SENDING TO FFMPEG | Size: %d bytes\n[HEX DUMP MULAI]\n%s\n[HEX DUMP SELESAI]",
+                        completeFrame.length, hexDump.toString().trim());
+
+                // Kirim binary ke stdin FFmpeg
                 ffmpegStdin.write(completeFrame);
                 ffmpegStdin.flush();
+
             } catch (IOException e) {
-                LOG.error("Gagal menulis ke FFmpeg", e);
+                // Tangkap error broken pipe jika FFmpeg tertutup
+                LOG.error("Gagal menulis ke FFmpeg. Stream pipe kemungkinan terputus (Broken Pipe).", e);
             } finally {
                 frameBuffer.reset();
             }
         }
     }
+
+    @PostConstruct
+    public void initFfmpegPusher() {
+        ffmpegExecutor.submit(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    // Ambil frame dari antrean (thread akan pasif menunggu jika kosong)
+                    byte[] frame = videoFrameQueue.take();
+
+                    ensureFfmpegRunning();
+
+                    // Suntik Start Code (00 00 00 01) jika tidak ada
+                    if (!(frame.length >= 4 && frame[0] == 0 && frame[1] == 0 && frame[2] == 0 && frame[3] == 1)) {
+                        ffmpegStdin.write(new byte[]{0, 0, 0, 1});
+                    }
+
+                    ffmpegStdin.write(frame);
+                    ffmpegStdin.flush();
+
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    LOG.error("FFmpeg Pusher Thread dihentikan.");
+                } catch (Exception e) {
+                    LOG.error("Pipa FFmpeg tersumbat atau putus. Mereset proses...", e);
+                    if (ffmpegProcess != null) {
+                        ffmpegProcess.destroyForcibly();
+                    }
+                }
+            }
+        });
+    }
+
+    @PreDestroy
+    public void cleanup() {
+        ffmpegExecutor.shutdownNow();
+        if (ffmpegProcess != null) ffmpegProcess.destroyForcibly();
+    }
+
+    private void directSendToFfmpeg(byte[] h264Frame) {
+        // Tawarkan data ke antrean secara aman tanpa memblokir thread Vert.x
+        boolean accepted = videoFrameQueue.offer(h264Frame);
+        if (!accepted) {
+            LOG.warn("⚠️ Antrean FFmpeg penuh! Frame di-drop untuk mencegah 60000ms timeout Vert.x.");
+        }
+    }
+
+
 
 
 }
