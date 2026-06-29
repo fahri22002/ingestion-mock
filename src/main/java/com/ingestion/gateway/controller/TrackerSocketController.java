@@ -90,56 +90,84 @@ public class TrackerSocketController {
             String remoteAddress = socket.remoteAddress().toString();
             LOG.info("Koneksi TCP Stream Baru: " + remoteAddress);
 
-            // Handler khusus untuk menampung potongan TCP JTT1078
             socket.handler(new Handler<Buffer>() {
-                // Buffer sementara untuk menyambung potongan TCP
                 Buffer accumulator = Buffer.buffer();
 
                 @Override
                 public void handle(Buffer chunk) {
-                    // 1. Tambahkan potongan baru ke penampung
                     accumulator.appendBuffer(chunk);
 
-                    // 2. Cek apakah panjang data sudah memenuhi minimal 1 Header (30 byte)
                     while (accumulator.length() >= 30) {
+                        // 1. Cari Magic Word: 0x30 0x31 0x63 0x64
+                        int magicIdx = -1;
+                        for (int i = 0; i <= accumulator.length() - 4; i++) {
+                            if (accumulator.getByte(i) == 0x30 && accumulator.getByte(i + 1) == 0x31 &&
+                                    accumulator.getByte(i + 2) == 0x63 && accumulator.getByte(i + 3) == 0x64) {
+                                magicIdx = i;
+                                break;
+                            }
+                        }
 
-                        // Opsional: Cek Sync Word JTT1078 (0x30 0x31 0x63 0x64) di 4 byte pertama
-                        // Jika tidak cocok, mungkin perlu membuang byte pertama sampai ketemu header.
-                        // Asumsi saat ini stream mulus.
-
-                        // 3. Baca Data Body Length (Byte ke-28 dan 29 sebagai Unsigned Short)
-                        int bodyLength = accumulator.getUnsignedShort(28);
-
-                        // 4. Hitung total panjang 1 frame utuh
-                        int totalFrameLength = 30 + bodyLength;
-
-                        // 5. Cek apakah seluruh data frame sudah mendarat di penampung
-                        if (accumulator.length() >= totalFrameLength) {
-                            // Frame sudah lengkap! Potong dari accumulator
-                            byte[] completeFrame = accumulator.getBytes(0, totalFrameLength);
-
-                            // Hapus frame yang sudah diproses dari accumulator
-                            accumulator = accumulator.getBuffer(totalFrameLength, accumulator.length());
-
-                            // 6. Teruskan frame UTUH ke Service & Codec
-                            vertx.executeBlocking(promise -> {
-                                try {
-                                    Consumer<byte[]> streamReplier = bytes -> {};
-                                    ingestionService.processRawMessage(remoteAddress, "TCP-STREAM", completeFrame, streamReplier);
-                                    promise.complete();
-                                } catch (Exception e) {
-                                    promise.fail(e);
-                                }
-                            }, res -> {
-                                if (res.failed()) {
-                                    LOG.error("Gagal memproses frame JTT1078: " + res.cause().getMessage());
-                                }
-                            });
-
-                        } else {
-                            // Frame belum lengkap (masih terpotong).
-                            // Hentikan loop dan tunggu sisa byte datang di event jaringan berikutnya.
+                        // Jika tidak ketemu, simpan 3 byte terakhir ke dalam BUFFER BARU
+                        if (magicIdx == -1) {
+                            byte[] sisa = accumulator.getBytes(accumulator.length() - 3, accumulator.length());
+                            accumulator = Buffer.buffer(sisa);
                             break;
+                        }
+
+                        // Buang data sampah sebelum Magic Word (Pindahkan sisa ke BUFFER BARU)
+                        if (magicIdx > 0) {
+                            byte[] sisa = accumulator.getBytes(magicIdx, accumulator.length());
+                            accumulator = Buffer.buffer(sisa);
+                        }
+
+                        // 2. Baca Header JTT1078
+                        if (accumulator.length() >= 30) {
+                            int dataType = (accumulator.getByte(15) >> 4) & 0x0F;
+
+                            int headerLength = 30; // Tipe 0,1,2 (Video)
+                            if (dataType == 4) headerLength = 18; // Data transparan
+                            else if (dataType == 3) headerLength = 26; // Audio
+
+                            if (accumulator.length() >= headerLength) {
+                                int bodyLengthOffset = headerLength - 2;
+                                int bodyLength = accumulator.getUnsignedShort(bodyLengthOffset);
+                                int totalFrameLength = headerLength + bodyLength;
+
+                                // 3. Jika frame sudah lengkap, potong dan kirim ke Service
+                                if (accumulator.length() >= totalFrameLength) {
+                                    byte[] completeFrame = accumulator.getBytes(0, totalFrameLength);
+
+                                    // PERBAIKAN: Reset accumulator dengan aman
+                                    if (accumulator.length() == totalFrameLength) {
+                                        // Jika data pas habis, buat buffer kosong baru
+                                        accumulator = Buffer.buffer();
+                                    } else {
+                                        // Jika ada sisa byte dari frame berikutnya, bungkus di buffer baru
+                                        byte[] sisaLagi = accumulator.getBytes(totalFrameLength, accumulator.length());
+                                        accumulator = Buffer.buffer(sisaLagi);
+                                    }
+
+                                    vertx.executeBlocking(promise -> {
+                                        try {
+                                            Consumer<byte[]> streamReplier = bytes -> {
+                                                if (bytes != null && bytes.length > 0) socket.write(Buffer.buffer(bytes));
+                                            };
+                                            ingestionService.processRawMessage(remoteAddress, "TCP-STREAM", completeFrame, streamReplier);
+                                            promise.complete();
+                                        } catch (Exception e) {
+                                            promise.fail(e);
+                                        }
+                                    }, res -> {
+                                        if (res.failed()) LOG.error("Gagal proses frame: " + res.cause().getMessage());
+                                    });
+
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
                         }
                     }
                 }
@@ -148,7 +176,7 @@ public class TrackerSocketController {
             socket.closeHandler(v -> LOG.info("Koneksi TCP Stream Terputus: " + remoteAddress));
         });
 
-        server.listen().onSuccess(s -> LOG.info("TCP Stream Listener (JTT1078) berjalan di port " + STREAM_PORT))
+        server.listen().onSuccess(s -> LOG.info("TCP Stream Listener berjalan di port " + STREAM_PORT))
                 .onFailure(Throwable::printStackTrace);
     }
 

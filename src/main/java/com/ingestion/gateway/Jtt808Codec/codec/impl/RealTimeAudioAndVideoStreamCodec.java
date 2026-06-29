@@ -100,13 +100,16 @@ public class RealTimeAudioAndVideoStreamCodec {
 
             // PENTING: Cek apakah data yang tersisa di buffer cukup
             if (buf.remaining() < bodyLength) {
-//                LOG.errorf("Body tidak lengkap. Perlu %d, sisa %d", bodyLength, buf.remaining());
                 return null;
             }
 
             byte[] body = new byte[bodyLength];
             buf.get(body);
             dto.setDataBody(body);
+
+            // ---> TAMBAHKAN BARIS INI <---
+            // Posisi buffer saat ini persis merepresentasikan total ukuran 1 frame utuh (Header + Body)
+            dto.setTotalFrameLength(buf.position());
 
         } catch (Exception e) {
             LOG.error("Gagal decode Real-time A/V Stream", e);
